@@ -1,0 +1,189 @@
+---
+title: "Factors Affecting Students' Math Scores"
+author: "Chengchen Qian"
+date: "12/20/2020"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#library all the packages
+library(tidyverse)
+library(brms)
+library(haven)
+library(broom)
+library(arm)
+library(gridExtra)
+library(table1)
+```
+
+```{r}
+#Filter the data, and conduct preliminary treatment
+d1=read.table("/Users/qianchengchen/Desktop/student-mat.csv",sep=",",header=TRUE,stringsAsFactors = T)
+summary(d1)
+
+sample_size <- 10000
+set.seed(853)
+
+new_data <- d1[c('school','sex','age','paid','studytime',
+                 'absences','G2','famsup','schoolsup')]
+
+new_data$school<-as.factor(new_data$school)
+new_data$sex<-as.factor(new_data$sex)
+new_data$age<-as.numeric(new_data$age)
+new_data$paid<-as.factor(new_data$paid)
+new_data$studytime<-as.numeric(new_data$studytime)
+new_data$absences<-as.numeric(new_data$absences)
+new_data$famsup<-as.factor(new_data$famsup)
+new_data$schoolsup<-as.factor(new_data$schoolsup)
+```
+
+
+```{r}
+#build propensity score
+propensity_score <- glm(paid~school+age+sex+studytime+absences
+                        +famsup+schoolsup,
+                        family = binomial,
+                        data = new_data)
+summary(propensity_score)
+```
+
+
+```{r}
+#propensity scores(probability of going to paid)
+prs_df <- data.frame(pr_score = predict(propensity_score, type = "response"),
+                     paid = propensity_score$model$paid)
+head(prs_df)
+
+labs <- paste("Actual paid type:", c("No", "Yes"))
+prs_df %>%
+  mutate(paid = ifelse(paid == "no", labs[1], labs[2])) %>%
+  ggplot(aes(x = pr_score)) +
+  geom_histogram(color = "white") +
+  facet_wrap(~paid) +
+  xlab("Probability of going to be paid") +
+  theme_bw()
+```
+
+
+```{r}
+#use propensity score to match pairs
+new_data <- 
+  augment(propensity_score, 
+          data = new_data,
+          type.predict = "response") %>% 
+  dplyr::select(-.resid, -.std.resid, -.hat, -.sigma, -.cooksd) 
+
+new_data <- 
+  new_data %>% 
+  arrange(.fitted, paid)
+
+new_data$treated <- 
+  if_else(new_data$paid == 'no', 0, 1)
+
+new_data$treated <- 
+  as.integer(new_data$treated)
+
+matches <- arm::matching(z = new_data$treated, 
+                         score = new_data$.fitted)
+
+new_data <- cbind(new_data, matches)
+
+new_data_matched <- 
+  new_data %>% 
+  filter(match.ind != 0) %>% 
+  dplyr::select(-match.ind, -pairs, -treated)
+
+head(new_data_matched)
+
+propensity_score_regression <- 
+  lm(G2 ~ school + sex + age + studytime + absences  + paid + famsup + schoolsup,
+     data = new_data_matched)
+summary(propensity_score_regression)
+huxtable::huxreg(propensity_score_regression)
+anova(propensity_score_regression)
+
+cor(new_data[c('age','studytime','absences')])
+```
+
+```{r}
+#Pint out a 2-in-1 graph of fitted value vs. residual and the normal Q-Q plot for propensity_score_regression.
+multi.res = resid(propensity_score_regression)
+fitted=fitted(propensity_score_regression)
+
+par(mfrow=c(2,2))
+plot(fitted, multi.res,ylab="Residuals", 
+     xlab=" fitted values",main="Residual plot") 
+abline(0, 0)
+multi.stdres = rstandard(propensity_score_regression) 
+qqnorm(multi.stdres,ylab="Standardized Residuals", 
+       xlab="Normal Scores", main="Normal Q-Q plot")
+qqline(multi.stdres)
+```
+
+
+```{r}
+#mean of each covariate against the estimated propensity score
+#If the match is great, 2 lines of each graph will be very close.
+fn_bal <- function(dta, variable) {
+  dta$variable <- dta[, variable]
+  if (variable == 'w3income') dta$variable <- dta$variable / 10^3
+  dta$paid <- as.factor(dta$paid)
+  support <- c(min(dta$variable), max(dta$variable))
+  ggplot(dta, aes(x = .fitted, y = variable, color = paid)) +
+    geom_point(alpha = 0.2, size = 1.3) +
+    geom_smooth(method = "loess", se = F) +
+    xlab("Propensity score") +
+    ylab(variable) +
+    theme_bw() +
+    ylim(support)}
+
+#library(gridExtra)
+dta_m <- new_data_matched
+grid.arrange(
+   fn_bal(dta_m, "G2") + theme(legend.position = "none"),
+   fn_bal(dta_m, "age") + theme(legend.position = "none"),
+   fn_bal(dta_m, "studytime") + theme(legend.position = "none"),
+   fn_bal(dta_m, "absences") + theme(legend.position = "none"),
+   nrow = 3, widths = c(1, 0.8))
+
+```
+
+
+
+```{r}
+#remove the variable 'school' and 'absences'
+propensity_score_regression_2 <- 
+  lm(G2 ~ sex + age + studytime + paid + schoolsup,
+     data = new_data_matched)
+summary(propensity_score_regression_2)
+huxtable::huxreg(propensity_score_regression_2)
+```
+
+
+```{r}
+#histogram of predict y in 2 models
+par(mfrow=c(2,2))
+propensity_score_regression_predict_y = predict(propensity_score_regression,
+                                                newdata = new_data,type = "response") 
+hist(propensity_score_regression_predict_y,breaks=50)
+
+propensity_score_regression_2_predict_y = predict(propensity_score_regression_2,
+                                                  newdata = new_data_matched,
+                                                  type = "response") 
+hist(propensity_score_regression_2_predict_y,breaks=50)
+
+```
+
+
+```{r}
+#Table1 after propensity score match
+table1(~ G2 + school + sex + age + studytime + absences + famsup + schoolsup| paid,
+       data = new_data_matched)
+```
+
